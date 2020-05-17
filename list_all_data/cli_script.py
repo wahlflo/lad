@@ -1,18 +1,16 @@
 import argparse
-import sys
-import stat
+import grp
 import os.path
 import pwd
-import grp
-import subprocess
-import re
+import stat
+import sys
 from collections import defaultdict
 from datetime import datetime
-from cli_formatter.output_formatting import colorize_string, Color, error, warning
-import psutil                       # install
-from dateutil import tz             # install python-dateutil
-from typing import List, Dict
 
+from cli_formatter.output_formatting import colorize_string, Color, error, warning
+from dateutil import tz
+
+from .libary import get_alternate_data_streams_recursively, get_alternate_data_streams_of_file, path_is_an_ntfs_filesystem
 
 WARNING_TEXT_WRONG_FILE_SYSTEM_PATH = 'Path is not under a NTFS filesystem partition - Alternate Data Streams can not be detected. Ensure that the mounted partition is mounted as NTFS. Use the -o streams_interface=windows option when using the mount command.'
 WARNING_TEXT_WRONG_FILE_SYSTEM_BASE_PATH = 'The provided path is not under a NTFS filesystem partition - Alternate Data Streams can only be detected under a mounted NTFS partition. Use the -o streams_interface=windows option when using the mount command. If an NTFS filesystem is mounted to a subfolder lad will detect Alternate Data Streams in this folder.'
@@ -56,9 +54,11 @@ def __generate_output_single_file(arguments, path_to_file: str, file_name: str, 
     time_last_change = datetime.fromtimestamp(time_last_change)
     time_last_change = time_last_change.astimezone(tz.tzlocal())  # convert time to local time zone
     if arguments.full_time:
-        time_last_change = time_last_change.strftime('%Y-%m-%d %T.{:.9f} %z'.format(file_info.st_mtime))
+        time_last_change_new = [time_last_change.strftime('%Y-%m-%d %T.{:.9f} %z'.format(file_info.st_mtime))]
     else:
-        time_last_change = '{}. {}'.format(time_last_change.strftime('%e').rjust(2), time_last_change.strftime('%B %H:%M'))
+        time_last_change_new = ['{}.'.format(time_last_change.strftime('%e').rjust(2)),
+                                time_last_change.strftime('%B'),
+                                time_last_change.strftime('%H:%M')]
 
     # strip the first '/' of the file name
     if len(file_name) > 1:
@@ -67,7 +67,7 @@ def __generate_output_single_file(arguments, path_to_file: str, file_name: str, 
     output_list = list()
 
     # add the file itself
-    output_list.append([file_permission_string, owner, group, file_size, time_last_change, file_name])
+    output_list.append([file_permission_string, owner, group, file_size] + time_last_change_new + [file_name])
 
     # add alternate data streams
     for ads in alternate_data_streams:
@@ -77,7 +77,7 @@ def __generate_output_single_file(arguments, path_to_file: str, file_name: str, 
         else:
             file_size = str(ads_file_stats.st_size)
 
-        output_list.append([file_permission_string, owner, group, file_size, time_last_change, file_name + ':' + colorize_string(text=ads, color=Color.BLUE)])
+        output_list.append([file_permission_string, owner, group, file_size] + time_last_change_new + [file_name + ':' + colorize_string(text=ads, color=Color.BLUE)])
 
     return output_list
 
@@ -95,7 +95,7 @@ def __bytes_to_human_readable(number_of_bytes: int) -> str:
     return "{.1f}{}".format(number_of_bytes, 'Y')
 
 
-if __name__ == '__main__':
+def main():
     flags_to_parse, path = __parse_cli_arguments()
 
     parser = argparse.ArgumentParser(usage='lad [OPTION]... [FILE]...', description='Lists information about the FILEs (the current directory by default) including Alternate Data Streams.', add_help=False)
@@ -120,27 +120,24 @@ if __name__ == '__main__':
 
     output = list()
 
-    if os.path.isfile(path):                                       # the path points to a file
+    if os.path.isfile(path):  # the path points to a file
         # check the filesystem and collect the alternate data streams
-        try:
-            __assert_that_path_is_an_ntfs_filesystem(path=base_path)
-        except WrongFilesystem:
+        if path_is_an_ntfs_filesystem(path=base_path):
+            alternate_data_streams = get_alternate_data_streams_of_file(path_to_file=base_path)
+        else:
+            alternate_data_streams = list()
             if not parsed_arguments.no_warning:
                 warning(WARNING_TEXT_WRONG_FILE_SYSTEM_PATH)
-            alternate_data_streams = list()
-        else:
-            alternate_data_streams = get_alternate_data_streams_of_file(path_to_file=base_path)
 
         output.extend(__generate_output_single_file(arguments=parsed_arguments, path_to_file=base_path, file_name=path, file_info=os.stat(base_path), alternate_data_streams=alternate_data_streams))
 
-    elif not parsed_arguments.recursive:                           # the path points to a directory (recursive flag is not set)
-        try:
-            __assert_that_path_is_an_ntfs_filesystem(base_path)
+    elif not parsed_arguments.recursive:  # the path points to a directory (recursive flag is not set)
+        if path_is_an_ntfs_filesystem(path=base_path):
             search_alternate_data_streams = True
-        except WrongFilesystem:
+        else:
+            search_alternate_data_streams = False
             if not parsed_arguments.no_warning:
                 warning(WARNING_TEXT_WRONG_FILE_SYSTEM_PATH)
-            search_alternate_data_streams = False
 
         for x in os.scandir(base_path):
             file_name = x.path.replace(base_path, '')
@@ -153,14 +150,11 @@ if __name__ == '__main__':
             generated_output = __generate_output_single_file(arguments=parsed_arguments, path_to_file=x.path, file_name=file_name, file_info=file_info, alternate_data_streams=alternate_data_streams)
             output.extend(generated_output)
 
-    else:                                                           # the path points to a directory (recursive flag is set)
+    else:  # the path points to a directory (recursive flag is set)
         # to faster the scan apply getfattr recursively on the directory and parse the complete output
 
-        if not parsed_arguments.no_warning:
-            try:
-                __assert_that_path_is_an_ntfs_filesystem(base_path)
-            except WrongFilesystem:
-                warning(WARNING_TEXT_WRONG_FILE_SYSTEM_BASE_PATH)
+        if not parsed_arguments.no_warning and not path_is_an_ntfs_filesystem(base_path):
+            warning(WARNING_TEXT_WRONG_FILE_SYSTEM_BASE_PATH)
 
         alternate_data_streams_dict = get_alternate_data_streams_recursively(path_to_directory=base_path)
 
@@ -177,6 +171,7 @@ if __name__ == '__main__':
                 if parsed_arguments.recursive and x.is_dir():
                     scan_directory(path_to_dir=x.path)
 
+
         scan_directory(path_to_dir=base_path)
 
     # Find maximum width of each column to print the table nicely
@@ -189,7 +184,11 @@ if __name__ == '__main__':
         for i, cell in enumerate(line):
             if i == len(line) - 1:
                 print(cell.ljust(max_width_for_each_column[i]), end='\n')
-            elif i == 3:    # the file size has to be aligned to the right
+            elif i == 3:  # the file size has to be aligned to the right
                 print(cell.rjust(max_width_for_each_column[i]), end=' ')
             else:
                 print(cell.ljust(max_width_for_each_column[i]), end=' ')
+
+
+if __name__ == '__main__':
+    main()
