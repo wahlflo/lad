@@ -165,7 +165,7 @@ def main():
                 try:
                     file_info = x.stat()
                 except OSError:
-                    warning(message='File {} could not be analyzed')
+                    warning(message='File {} could not be analyzed'.format(file_name))
                     continue
 
                 alternate_data_streams = alternate_data_streams_dict.get(x.path, list())
