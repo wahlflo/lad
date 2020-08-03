@@ -58,6 +58,7 @@ def __generate_output_single_file(arguments, path_to_file: str, file_name: str, 
     else:
         time_last_change_new = ['{}.'.format(time_last_change.strftime('%e').rjust(2)),
                                 time_last_change.strftime('%B'),
+                                time_last_change.strftime('%Y'),
                                 time_last_change.strftime('%H:%M')]
 
     # strip the first '/' of the file name
@@ -158,11 +159,14 @@ def main():
 
         alternate_data_streams_dict = get_alternate_data_streams_recursively(path_to_directory=base_path)
 
-
         def scan_directory(path_to_dir):
             for x in os.scandir(path_to_dir):
                 file_name = x.path.replace(base_path, '')
-                file_info = x.stat()
+                try:
+                    file_info = x.stat()
+                except OSError:
+                    warning(message='File {} could not be analyzed')
+                    continue
 
                 alternate_data_streams = alternate_data_streams_dict.get(x.path, list())
                 generated_output = __generate_output_single_file(arguments=parsed_arguments, path_to_file=x.path, file_name=file_name, file_info=file_info, alternate_data_streams=alternate_data_streams)
@@ -170,7 +174,6 @@ def main():
 
                 if parsed_arguments.recursive and x.is_dir():
                     scan_directory(path_to_dir=x.path)
-
 
         scan_directory(path_to_dir=base_path)
 
